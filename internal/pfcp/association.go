@@ -16,9 +16,9 @@ import (
 // The runtime adapter will look up configured UPFs, update association state,
 // and return any restart-recovery work as afterResponse.
 type AssociationStateManager interface {
-	SetupAssociation(peer pfcptype.NodeID, recoveryTime time.Time) (cause uint8, afterResponse func())
-	UpdateAssociation(peer pfcptype.NodeID, request *message.AssociationUpdateRequest) (cause uint8, afterResponse func())
-	ReleaseAssociation(peer pfcptype.NodeID) (cause uint8)
+	SetupAssociation(peer pfcptype.NodeID, recoveryTime time.Time, remote *net.UDPAddr) (uint8, func())
+	UpdateAssociation(peer pfcptype.NodeID, request *message.AssociationUpdateRequest, remote *net.UDPAddr) (uint8, func())
+	ReleaseAssociation(peer pfcptype.NodeID, remote *net.UDPAddr) uint8
 }
 
 func (s *PfcpServer) SetAssociationStateManager(manager AssociationStateManager) {
@@ -29,6 +29,7 @@ func (s *PfcpServer) SetAssociationStateManager(manager AssociationStateManager)
 
 func (s *PfcpServer) handleAssociationSetupRequest(
 	request *message.AssociationSetupRequest,
+	remote *net.UDPAddr,
 ) (*message.AssociationSetupResponse, func()) {
 	responseIEs := []*ie.IE{
 		ie.NewCause(ie.CauseMandatoryIEMissing),
@@ -69,7 +70,7 @@ func (s *PfcpServer) handleAssociationSetupRequest(
 		return response, nil
 	}
 
-	cause, afterResponse := manager.SetupAssociation(peer, recoveryTime)
+	cause, afterResponse := manager.SetupAssociation(peer, recoveryTime, remote)
 	response.Cause = ie.NewCause(cause)
 	if cause != ie.CauseRequestAccepted {
 		return response, nil
@@ -79,6 +80,7 @@ func (s *PfcpServer) handleAssociationSetupRequest(
 
 func (s *PfcpServer) handleAssociationUpdateRequest(
 	request *message.AssociationUpdateRequest,
+	remote *net.UDPAddr,
 ) (*message.AssociationUpdateResponse, func()) {
 	responseIEs := []*ie.IE{
 		ie.NewCause(ie.CauseMandatoryIEMissing),
@@ -118,7 +120,7 @@ func (s *PfcpServer) handleAssociationUpdateRequest(
 		return response, nil
 	}
 
-	cause, afterResponse := manager.UpdateAssociation(peer, request)
+	cause, afterResponse := manager.UpdateAssociation(peer, request, remote)
 	response.Cause = ie.NewCause(cause)
 	if cause != ie.CauseRequestAccepted {
 		return response, nil
@@ -171,11 +173,12 @@ func validateAssociationUpdate(request *message.AssociationUpdateRequest) (uint8
 
 func (s *PfcpServer) handleAssociationReleaseRequest(
 	request *message.AssociationReleaseRequest,
+	remote *net.UDPAddr,
 ) *message.AssociationReleaseResponse {
+	// Unlike Setup/Update's variadic constructors, this constructor accepts a
+	// nil Node ID and omits it when marshaling.
 	response := message.NewAssociationReleaseResponse(
-		request.Sequence(),
-		s.localNodeIDIE(),
-		ie.NewCause(ie.CauseMandatoryIEMissing),
+		request.Sequence(), s.localNodeIDIE(), ie.NewCause(ie.CauseMandatoryIEMissing),
 	)
 	if request.NodeID == nil {
 		s.log.Warn("PFCP Association Release Request is missing Node ID")
@@ -196,7 +199,7 @@ func (s *PfcpServer) handleAssociationReleaseRequest(
 		response.Cause = ie.NewCause(ie.CauseNoEstablishedPFCPAssociation)
 		return response
 	}
-	response.Cause = ie.NewCause(manager.ReleaseAssociation(peer))
+	response.Cause = ie.NewCause(manager.ReleaseAssociation(peer, remote))
 	return response
 }
 
@@ -305,20 +308,35 @@ func nodeIDFromIE(nodeIDIE *ie.IE) (pfcptype.NodeID, error) {
 	}
 	switch nodeIDIE.Payload[0] {
 	case ie.NodeIDIPv4Address:
+		if len(nodeIDIE.Payload) != 1+net.IPv4len {
+			return pfcptype.NodeID{}, fmt.Errorf("invalid IPv4 Node ID length")
+		}
 		ip := net.ParseIP(value).To4()
 		if ip == nil {
 			return pfcptype.NodeID{}, fmt.Errorf("invalid IPv4 Node ID %q", value)
 		}
 		return pfcptype.NodeID{NodeIdType: pfcptype.NodeIdTypeIpv4Address, IP: ip}, nil
 	case ie.NodeIDIPv6Address:
+		if len(nodeIDIE.Payload) != 1+net.IPv6len {
+			return pfcptype.NodeID{}, fmt.Errorf("invalid IPv6 Node ID length")
+		}
 		ip := net.ParseIP(value)
 		if ip == nil || ip.To4() != nil {
 			return pfcptype.NodeID{}, fmt.Errorf("invalid IPv6 Node ID %q", value)
 		}
 		return pfcptype.NodeID{NodeIdType: pfcptype.NodeIdTypeIpv6Address, IP: ip.To16()}, nil
 	case ie.NodeIDFQDN:
-		if value == "" {
-			return pfcptype.NodeID{}, fmt.Errorf("empty FQDN Node ID")
+		if value == "" || len(nodeIDIE.Payload) > 255 {
+			return pfcptype.NodeID{}, fmt.Errorf("invalid FQDN Node ID length")
+		}
+		// TS 29.244 8.2.38 uses DNS labels without the trailing zero.
+		// go-pfcp otherwise silently accepts a valid prefix of a truncated FQDN.
+		for remaining := nodeIDIE.Payload[1:]; len(remaining) != 0; {
+			labelLen := int(remaining[0])
+			if labelLen == 0 || labelLen > 63 || labelLen >= len(remaining) {
+				return pfcptype.NodeID{}, fmt.Errorf("invalid FQDN Node ID label")
+			}
+			remaining = remaining[labelLen+1:]
 		}
 		return pfcptype.NodeID{NodeIdType: pfcptype.NodeIdTypeFqdn, FQDN: value}, nil
 	default:

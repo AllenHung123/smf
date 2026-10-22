@@ -78,9 +78,9 @@ func (p *Processor) ToBeAssociatedWithUPF(smfPfcpContext context.Context, upf *s
 
 func formatUPF(upf *smf_context.UPF) string {
 	if upf.NodeID.NodeIdType == pfcptype.NodeIdTypeFqdn {
-		return fmt.Sprintf("[%s](%s)", upf.NodeID.FQDN, upf.NodeID.ResolveNodeIdToIp().String())
+		return fmt.Sprintf("[%s](%s)", upf.NodeID.FQDN, upf.PFCPAddr().IP.String())
 	}
-	return fmt.Sprintf("[%s]", upf.NodeID.ResolveNodeIdToIp().String())
+	return fmt.Sprintf("[%s]", upf.PFCPAddr().IP.String())
 }
 
 func (p *Processor) ReleaseAllResourcesOfUPF(upf *smf_context.UPF) {
@@ -157,10 +157,7 @@ func (p *Processor) setupPfcpAssociation(
 		return fmt.Errorf("go-pfcp active client is not configured")
 	}
 
-	response, err := client.SendAssociationSetupRequest(ctx, &net.UDPAddr{
-		IP:   upf.NodeID.ResolveNodeIdToIp(),
-		Port: pfcpPeerPort,
-	})
+	response, err := client.SendAssociationSetupRequest(ctx, upf.PFCPAddrForSetup())
 	if err != nil {
 		return err
 	}
@@ -174,7 +171,7 @@ func (p *Processor) setupPfcpAssociation(
 	upf.SetRecoveryTimeStamp(recoveryTime)
 
 	logger.MainLog.Infof("Received PFCP Association Setup Accepted Response from UPF%s", upfStr)
-	logger.MainLog.Infof("UPF(%s) setup association", upf.NodeID.ResolveNodeIdToIp().String())
+	logger.MainLog.Infof("UPF(%s) setup association", upf.PFCPAddr().IP.String())
 	return nil
 }
 
@@ -234,10 +231,7 @@ func (p *Processor) doPfcpHeartbeat(
 		return fmt.Errorf("go-pfcp active client is not configured")
 	}
 
-	response, err := client.SendHeartbeatRequest(ctx, &net.UDPAddr{
-		IP:   upf.NodeID.ResolveNodeIdToIp(),
-		Port: pfcpPeerPort,
-	})
+	response, err := client.SendHeartbeatRequest(ctx, upf.PFCPAddr())
 	if err != nil {
 		upf.CancelAssociationIfGeneration(associationGeneration)
 		return fmt.Errorf("SendHeartbeatRequest error: %w", err)

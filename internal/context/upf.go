@@ -74,6 +74,9 @@ type UPF struct {
 	uuid                uuid.UUID
 	NodeID              pfcptype.NodeID
 	Addr                string
+	pfcpAddressMu       sync.Mutex
+	pfcpAddresses       []net.IP
+	pfcpResolveAfter    time.Time
 	recoveryTimeStampMu sync.RWMutex
 	recoveryTimeStamp   time.Time
 
@@ -254,6 +257,7 @@ func (upf *UPF) EstablishAssociation(parent context.Context) context.Context {
 		upf.associationMu.Lock()
 		if upf.associationGeneration == generation {
 			upf.associationState = AssociationDown
+			upf.resetPFCPAddresses()
 		}
 		upf.associationMu.Unlock()
 	})
@@ -293,6 +297,7 @@ func (upf *UPF) cancelAssociationLocked() context.CancelFunc {
 	cancel := upf.cancelAssociation
 	upf.associationGeneration++
 	upf.associationState = AssociationDown
+	upf.resetPFCPAddresses()
 	upf.recoveryTimeStampMu.Lock()
 	upf.recoveryTimeStamp = time.Time{}
 	upf.recoveryTimeStampMu.Unlock()
@@ -669,34 +674,30 @@ func (upf *UPF) GetInterface(interfaceType models.Nrf_NFMgmt_UPInterfaceType, dn
 	return nil
 }
 
-func (upf *UPF) PFCPAddr() *net.UDPAddr {
-	return &net.UDPAddr{
-		IP:   upf.NodeID.ResolveNodeIdToIp(),
-		Port: 8805,
-	}
-}
-
-// *** add unit test ***//
+// RetrieveUPFNodeByNodeID matches configured identities first. A numeric Node
+// ID may also identify a configured FQDN's PFCP address (as in Compose).
+// Never resolve a peer-supplied FQDN to establish trust in an unknown identity.
 func RetrieveUPFNodeByNodeID(nodeID pfcptype.NodeID) *UPF {
-	var targetUPF *UPF = nil
-	upfPool.Range(func(key, value interface{}) bool {
-		curUPF := value.(*UPF)
-		if curUPF.NodeID.NodeIdType != nodeID.NodeIdType &&
-			(curUPF.NodeID.NodeIdType == pfcptype.NodeIdTypeFqdn || nodeID.NodeIdType == pfcptype.NodeIdTypeFqdn) {
-			curUPFNodeIdIP := curUPF.NodeID.ResolveNodeIdToIp().To4()
-			nodeIdIP := nodeID.ResolveNodeIdToIp().To4()
-			logger.CtxLog.Tracef("RetrieveUPF - upfNodeIdIP:[%+v], nodeIdIP:[%+v]", curUPFNodeIdIP, nodeIdIP)
-			if reflect.DeepEqual(curUPFNodeIdIP, nodeIdIP) {
-				targetUPF = curUPF
-				return false
-			}
-		} else if reflect.DeepEqual(curUPF.NodeID, nodeID) {
-			targetUPF = curUPF
+	var targetUPF *UPF
+	upfPool.Range(func(_, value interface{}) bool {
+		upf := value.(*UPF)
+		if upf.NodeID.EqualsTo(&nodeID) {
+			targetUPF = upf
 			return false
 		}
 		return true
 	})
-
+	if targetUPF != nil || nodeID.NodeIdType == pfcptype.NodeIdTypeFqdn {
+		return targetUPF
+	}
+	upfPool.Range(func(_, value interface{}) bool {
+		upf := value.(*UPF)
+		if upf.NodeID.NodeIdType == pfcptype.NodeIdTypeFqdn && upf.MatchesPFCPSource(nodeID.IP) {
+			targetUPF = upf
+			return false
+		}
+		return true
+	})
 	return targetUPF
 }
 
@@ -1020,7 +1021,7 @@ func (upf *UPF) IsAssociated() error {
 		return nil
 	}
 	return fmt.Errorf("UPF[%s] not associated with SMF",
-		upf.NodeID.ResolveNodeIdToIp().String())
+		upf.NodeID.String())
 }
 
 func (state UPFAssociationState) String() string {

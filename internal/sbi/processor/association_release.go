@@ -184,6 +184,8 @@ func (p *Processor) deleteAssociationPFCPSession(
 	}
 
 	request := message.NewSessionDeletionRequest(0, 0, sessionContext.RemoteSEID, 0, 0)
+	// A session may use another UPF address; keep its destination selection
+	// separate from the association's pinned node address.
 	response, err := client.SendSessionDeletionRequest(
 		ctx,
 		request,
