@@ -42,7 +42,7 @@ func TestBuildNFProfileAuthorizationPolicy(t *testing.T) {
 		models.Nrf_NFMgmt_NFType_AMF, models.Nrf_NFMgmt_NFType_SMF,
 	}, profile.NfServices[0].AllowedNfTypes)
 	require.ElementsMatch(t, []models.Nrf_NFMgmt_NFType{
-		models.Nrf_NFMgmt_NFType_PCF, models.Nrf_NFMgmt_NFType_CHF,
+		models.Nrf_NFMgmt_NFType_AMF, models.Nrf_NFMgmt_NFType_PCF, models.Nrf_NFMgmt_NFType_CHF,
 	}, profile.NfServices[1].AllowedNfTypes)
 	require.Contains(t, profile.NfServices[2].AllowedNfTypes, models.Nrf_NFMgmt_NFType_NEF)
 	require.Empty(t, profile.NfServices[3].AllowedNfTypes)
@@ -154,7 +154,7 @@ func TestNRFLifecycleOAuth(t *testing.T) {
 			}
 			profile := <-registeredProfiles
 			require.ElementsMatch(t, []models.Nrf_NFMgmt_NFType{
-				models.Nrf_NFMgmt_NFType_PCF, models.Nrf_NFMgmt_NFType_CHF,
+				models.Nrf_NFMgmt_NFType_AMF, models.Nrf_NFMgmt_NFType_PCF, models.Nrf_NFMgmt_NFType_CHF,
 			}, profile.NfServices[0].AllowedNfTypes)
 			target, requester := models.Nrf_NFMgmt_NFType_AMF, models.Nrf_NFMgmt_NFType_SMF
 			_, err = c.SendSearchNFInstances(nrf.URL, target, requester,

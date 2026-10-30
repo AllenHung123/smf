@@ -44,6 +44,18 @@ func (s *namfService) getCommunicationClient(uri string) *Comm.APIClient {
 func (s *namfService) N1N2MessageTransfer(
 	ctx context.Context, supi string, n1n2Request models.N1N2MessageTransferRequestBody, apiPrefix string,
 ) (*models.Amf_Comm_N1N2MessageTransferRspData, error) {
+	rsp, err := s.N1N2MessageTransferWithLocation(ctx, supi, n1n2Request, apiPrefix)
+	if err != nil || rsp == nil {
+		return nil, err
+	}
+	return rsp.Amf_Comm_N1N2MessageTransferRspData, nil
+}
+
+// N1N2MessageTransferWithLocation preserves the resource URI used to correlate
+// asynchronous failure notifications, without changing existing callers.
+func (s *namfService) N1N2MessageTransferWithLocation(
+	ctx context.Context, supi string, n1n2Request models.N1N2MessageTransferRequestBody, apiPrefix string,
+) (*Comm.N1N2MessageTransferResponse, error) {
 	client := s.getCommunicationClient(apiPrefix)
 	if client == nil {
 		return nil, fmt.Errorf("N1N2MessageTransfer client is nil: (%v)", apiPrefix)
@@ -59,5 +71,5 @@ func (s *namfService) N1N2MessageTransfer(
 		return nil, err
 	}
 
-	return rsp.Amf_Comm_N1N2MessageTransferRspData, err
+	return rsp, nil
 }

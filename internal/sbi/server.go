@@ -73,7 +73,7 @@ func newRouter(s *Server) *gin.Engine {
 	router := logger_util.NewGinWithLogrus(logger.GinLog)
 
 	router.Use(metrics.InboundMetrics())
-	mountCallbackRoutes(router, s, smf_context.GetSelf())
+	mountCallbackRoutes(router, s)
 
 	upiGroup := router.Group(factory.UpiUriPrefix)
 	upiAuthCheck := util_oauth.NewRouterAuthorizationCheck(models.Nrf_NFMgmt_ServiceName_NSMF_OAM)
@@ -115,14 +115,10 @@ func newRouter(s *Server) *gin.Engine {
 	return router
 }
 
-func mountCallbackRoutes(router *gin.Engine, s *Server, authContext smf_context.NFContext) {
-	smfCallbackGroup := router.Group(factory.SmfCallbackUriPrefix)
-	smfCallbackRoutes := s.getCallbackRoutes()
-	smfCallbackAuthCheck := util_oauth.NewRouterAuthorizationCheck(smf_context.ServiceNameNsmfCallback)
-	smfCallbackGroup.Use(func(c *gin.Context) {
-		smfCallbackAuthCheck.Check(c, authContext)
-	})
-	applyRoutes(smfCallbackGroup, smfCallbackRoutes)
+// TS 29.500 Release 17, 6.7.3: notification callbacks do not use OAuth
+// access tokens. Transport authentication and local deployment policy still apply.
+func mountCallbackRoutes(router *gin.Engine, s *Server) {
+	applyRoutes(router.Group(factory.SmfCallbackUriPrefix), s.getCallbackRoutes())
 }
 
 func (s *Server) Run(traceCtx context.Context, wg *sync.WaitGroup) error {

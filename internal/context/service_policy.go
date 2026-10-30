@@ -26,6 +26,7 @@ var servicePolicies = map[models.Nrf_NFMgmt_ServiceName][]models.Nrf_NFMgmt_NFTy
 		models.Nrf_NFMgmt_NFType_DCCF,
 	},
 	ServiceNameNsmfCallback: {
+		models.Nrf_NFMgmt_NFType_AMF,
 		models.Nrf_NFMgmt_NFType_PCF,
 		models.Nrf_NFMgmt_NFType_CHF,
 	},

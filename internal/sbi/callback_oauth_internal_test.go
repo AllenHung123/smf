@@ -1,109 +1,101 @@
 package sbi
 
 import (
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/pem"
-	"math/big"
+	"bytes"
+	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
-	"os"
-	"path/filepath"
 	"testing"
-	"time"
-
-	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/require"
 
 	smf_context "github.com/free5gc/smf/internal/context"
 	"github.com/free5gc/smf/pkg/factory"
+	"github.com/free5gc/util/idgenerator"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
 )
 
-func TestCallbackOAuthAuthorization(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	require.NoError(t, err)
-	nrfID, smfID := uuid.NewString(), uuid.NewString()
-	identity, err := url.Parse("urn:uuid:" + nrfID)
-	require.NoError(t, err)
-	certificate := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		NotBefore:    time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
-		KeyUsage: x509.KeyUsageDigitalSignature,
-		URIs:     []*url.URL{identity},
-	}
-	der, err := x509.CreateCertificate(rand.Reader, certificate, certificate, &key.PublicKey, key)
-	require.NoError(t, err)
-	certPath := filepath.Join(t.TempDir(), "nrf.pem")
-	require.NoError(t, os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600))
+func TestCallbackDoesNotRequireOAuth(t *testing.T) {
+	self := smf_context.GetSelf()
+	old := self.OAuth2Required
+	self.OAuth2Required = true
+	t.Cleanup(func() { self.OAuth2Required = old })
+	router := gin.New()
+	mountCallbackRoutes(router, &Server{})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodPost,
+		factory.SmfCallbackUriPrefix+"/sm-policies/ref/terminate", nil))
+	require.Equal(t, http.StatusNotImplemented, response.Code)
+	// The ordinary service authorization check remains active with OAuth enabled.
+	require.Error(t, self.AuthorizationCheck("", "nsmf-pdusession"))
+}
 
-	tests := []struct {
-		name     string
-		audience string
-		issuer   string
-		scope    string
-		expiry   int64
-		scheme   string
-		disabled bool
-		want     int
+func TestN1N2TransferFailureCallback(t *testing.T) {
+	oldGenerator := smf_context.TeidGenerator
+	smf_context.TeidGenerator = idgenerator.NewGenerator(1, math.MaxUint32)
+	t.Cleanup(func() { smf_context.TeidGenerator = oldGenerator })
+	const resource = "https://amf.example/namf-comm/v1/ue-contexts/ue/n1-n2-messages/1"
+	for _, tt := range []struct {
+		name, storedURI, notifiedURI                   string
+		noTransfer, stale, unknown, malformed, missing bool
+		want                                           int
 	}{
-		{
-			"instance token", smfID, nrfID, "nsmf-callback", time.Now().Add(time.Minute).Unix(), "Bearer", false,
-			http.StatusNotImplemented,
-		},
-		{
-			"type token", "SMF", nrfID, "nsmf-callback", time.Now().Add(time.Minute).Unix(), "Bearer", false,
-			http.StatusNotImplemented,
-		},
-		{
-			"wrong instance", uuid.NewString(), nrfID, "nsmf-callback", time.Now().Add(time.Minute).Unix(), "Bearer", false,
-			http.StatusUnauthorized,
-		},
-		{
-			"wrong issuer", smfID, uuid.NewString(), "nsmf-callback", time.Now().Add(time.Minute).Unix(), "Bearer", false,
-			http.StatusUnauthorized,
-		},
-		{
-			"expired", smfID, nrfID, "nsmf-callback", time.Now().Add(-time.Minute).Unix(), "Bearer", false,
-			http.StatusUnauthorized,
-		},
-		{"missing expiry", smfID, nrfID, "nsmf-callback", 0, "Bearer", false, http.StatusUnauthorized},
-		{
-			"wrong scope", smfID, nrfID, "npcf-smpolicycontrol", time.Now().Add(time.Minute).Unix(), "Bearer", false,
-			http.StatusUnauthorized,
-		},
-		{
-			"wrong scheme", smfID, nrfID, "nsmf-callback", time.Now().Add(time.Minute).Unix(), "Basic", false,
-			http.StatusUnauthorized,
-		},
-		{"missing token", smfID, nrfID, "nsmf-callback", 0, "", false, http.StatusUnauthorized},
-		{"OAuth disabled", smfID, nrfID, "", 0, "", true, http.StatusNotImplemented},
-	}
-	for _, tt := range tests {
+		{name: "matched without token", storedURI: resource, notifiedURI: resource, want: 204},
+		{name: "unrelated transfer", storedURI: resource, notifiedURI: resource + "-other", want: 404},
+		{name: "no pending transfer", notifiedURI: resource, noTransfer: true, want: 404},
+		{name: "superseded callback", storedURI: resource, notifiedURI: resource, stale: true, want: 404},
+		{name: "dummy without Location", storedURI: "http:", notifiedURI: "http:", want: 204},
+		{name: "alternate dummy scheme", storedURI: "http:", notifiedURI: "https:", want: 204},
+		{name: "dummy cannot match real Location", storedURI: resource, notifiedURI: "http:", want: 404},
+		{name: "real URI cannot match dummy", storedURI: "http:", notifiedURI: resource, want: 404},
+		{name: "unknown session", storedURI: resource, notifiedURI: resource, unknown: true, want: 404},
+		{name: "malformed JSON", malformed: true, want: 400},
+		{name: "missing fields", missing: true, want: 400},
+	} {
 		t.Run(tt.name, func(t *testing.T) {
-			self := &smf_context.SMFContext{NfInstanceID: smfID, NrfUri: "http://127.0.0.1", NrfCertPem: certPath}
-			require.NoError(t, self.SetOAuth2Required(!tt.disabled))
-			router := gin.New()
-			mountCallbackRoutes(router, &Server{}, self)
-			request := httptest.NewRequestWithContext(t.Context(),
-				http.MethodPost, factory.SmfCallbackUriPrefix+"/sm-policies/ref/terminate", nil)
-			if tt.scheme != "" {
-				claims := jwt.MapClaims{"iss": tt.issuer, "aud": tt.audience, "scope": tt.scope}
-				if tt.expiry != 0 {
-					claims["exp"] = tt.expiry
-				}
-				token, signErr := jwt.NewWithClaims(jwt.SigningMethodRS512, claims).SignedString(key)
-				require.NoError(t, signErr)
-				request.Header.Set("Authorization", tt.scheme+" "+token)
+			sm := smf_context.NewSMContext("imsi-r17-callback", 1)
+			t.Cleanup(func() { smf_context.RemoveSMContext(sm.Ref) })
+			transferID := uuid.NewString()
+			sm.N1N2TransferID, sm.N1N2TransferURI = transferID, tt.storedURI
+			if tt.noTransfer {
+				sm.N1N2TransferID = ""
 			}
-			response := httptest.NewRecorder()
-			router.ServeHTTP(response, request)
-			// The existing terminate handler returns 501. Reaching it proves the
-			// callback middleware accepts this scope without a second PCF check.
-			require.Equal(t, tt.want, response.Code, response.Body.String())
+			if tt.stale {
+				sm.N1N2TransferID = uuid.NewString()
+			}
+			ref := sm.Ref
+			if tt.unknown {
+				ref = uuid.NewString()
+			}
+			router := gin.New()
+			mountCallbackRoutes(router, &Server{})
+			body := fmt.Sprintf(`{"cause":"UE_NOT_RESPONDING","n1n2MsgDataUri":%q}`, tt.notifiedURI)
+			if tt.malformed {
+				body = "{"
+			}
+			if tt.missing {
+				body = "{}"
+			}
+			send := func(body string) int {
+				req := httptest.NewRequest(http.MethodPost, factory.SmfCallbackUriPrefix+"/n1n2-failure/"+ref+"/"+transferID, bytes.NewBufferString(body))
+				req.Header.Set("Content-Type", "application/json")
+				response := httptest.NewRecorder()
+				router.ServeHTTP(response, req)
+				return response.Code
+			}
+			require.Equal(t, tt.want, send(body))
+			if tt.want != 204 {
+				require.Nil(t, sm.N1N2TransferFailure)
+				return
+			}
+			first := sm.N1N2TransferFailure
+			require.NotNil(t, first)
+			require.Equal(t, tt.notifiedURI, first.N1n2MsgDataUri)
+			require.Equal(t, 204, send(body), "exact retry is idempotent")
+			require.Same(t, first, sm.N1N2TransferFailure)
+			require.Equal(t, 409, send(fmt.Sprintf(`{"cause":"AN_NOT_RESPONDING","n1n2MsgDataUri":%q}`, tt.notifiedURI)))
+			require.Same(t, first, sm.N1N2TransferFailure, "conflicting retry cannot overwrite outcome")
 		})
 	}
 }

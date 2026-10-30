@@ -161,6 +161,12 @@ type SMContext struct {
 	SelectedPCFProfile models.Nrf_NFDisc_NFProfile
 	SelectedCHFProfile models.Nrf_NFDisc_NFProfile
 	SmStatusNotifyUri  string
+	// Last failure reported by AMF for this session's N1/N2 transfer.
+	// Access is protected by SMLock, like the other session state.
+	N1N2TransferFailure *models.Amf_Comm_N1N2MsgTxfrFailureNotification
+	// Correlation for the latest downlink transfer; also protected by SMLock.
+	N1N2TransferID  string
+	N1N2TransferURI string
 
 	Tunnel      *UPTunnel
 	DCTunnel    *UPTunnel
